@@ -1,18 +1,14 @@
 #![allow(clippy::type_complexity)]
 
-use std::cell::RefCell;
+use std::{
+    sync::Arc,
+};
 use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
-use std::rc::Rc;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-
-use futures::future::{ok, Ready};
-use futures::Future;
+use futures::future::{ok, Either, Ready};
 
 use actix_service::{Service, Transform};
 use actix_web::{
-    body::MessageBody, dev::ServiceRequest, dev::ServiceResponse, Error, HttpMessage, HttpResponse,
+    body::AnyBody, dev::ServiceRequest, dev::ServiceResponse, Error, HttpMessage, HttpResponse,
     Result,
 };
 
@@ -24,6 +20,7 @@ use tokio::sync::RwLock;
 
 #[cfg(feature = "runtime-async-std")]
 use async_std::sync::RwLock;
+use futures::executor::block_on;
 
 #[derive(Clone)]
 pub struct CasbinVals {
@@ -53,21 +50,20 @@ impl CasbinService {
     }
 }
 
-impl<S, B> Transform<S, ServiceRequest> for CasbinService
-where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
-    B: MessageBody,
+impl<S> Transform<S, ServiceRequest> for CasbinService
+    where
+        S: Service<ServiceRequest, Response=ServiceResponse<AnyBody>, Error=Error>,
 {
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse<AnyBody>;
     type Error = Error;
-    type InitError = ();
     type Transform = CasbinMiddleware<S>;
+    type InitError = ();
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
         ok(CasbinMiddleware {
             enforcer: self.enforcer.clone(),
-            service: Rc::new(RefCell::new(service)),
+            service,
         })
     }
 }
@@ -87,76 +83,36 @@ impl DerefMut for CasbinService {
 }
 
 pub struct CasbinMiddleware<S> {
-    service: Rc<RefCell<S>>,
+    service: S,
     enforcer: Arc<RwLock<CachedEnforcer>>,
 }
 
-impl<S, B> Service<ServiceRequest> for CasbinMiddleware<S>
-where
-    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
-    B: MessageBody,
+impl<S> Service<ServiceRequest> for CasbinMiddleware<S>
+    where
+        S: Service<ServiceRequest, Response=ServiceResponse<AnyBody>, Error=Error>,
 {
-    type Response = ServiceResponse<B>;
+    type Response = ServiceResponse<AnyBody>;
     type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+    type Future = Either<S::Future, Ready<Result<Self::Response, Self::Error>>>;
 
-    fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.service.poll_ready(cx)
-    }
+    actix_service::forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let cloned_enforcer = self.enforcer.clone();
-        let srv = self.service.clone();
 
-        Box::pin(async move {
-            let path = req.path().to_string();
-            let action = req.method().as_str().to_string();
-            let option_vals = req.extensions().get::<CasbinVals>().map(|x| x.to_owned());
-            let vals = match option_vals {
-                Some(value) => value,
-                None => {
-                    return Ok(req.into_response(HttpResponse::Unauthorized().finish().into_body()))
-                }
-            };
+        let path = req.path().to_string();
+        let action = req.method().as_str().to_string();
+
+        let option_vals = req.extensions().get::<CasbinVals>().map(|x| x.to_owned());
+        if let Some(vals) = option_vals {
             let subject = vals.subject.clone();
 
-            if !vals.subject.is_empty() {
-                if let Some(domain) = vals.domain {
-                    let mut lock = cloned_enforcer.write().await;
-                    match lock.enforce_mut(vec![subject, domain, path, action]) {
-                        Ok(true) => {
-                            drop(lock);
-                            srv.call(req).await
-                        }
-                        Ok(false) => {
-                            drop(lock);
-                            Ok(req.into_response(HttpResponse::Forbidden().finish().into_body()))
-                        }
-                        Err(_) => {
-                            drop(lock);
-                            Ok(req.into_response(HttpResponse::BadGateway().finish().into_body()))
-                        }
-                    }
-                } else {
-                    let mut lock = cloned_enforcer.write().await;
-                    match lock.enforce_mut(vec![subject, path, action]) {
-                        Ok(true) => {
-                            drop(lock);
-                            srv.call(req).await
-                        }
-                        Ok(false) => {
-                            drop(lock);
-                            Ok(req.into_response(HttpResponse::Forbidden().finish().into_body()))
-                        }
-                        Err(_) => {
-                            drop(lock);
-                            Ok(req.into_response(HttpResponse::BadGateway().finish().into_body()))
-                        }
-                    }
-                }
-            } else {
-                Ok(req.into_response(HttpResponse::Unauthorized().finish().into_body()))
+            let mut lock = block_on(cloned_enforcer.write());
+            if let Ok(_) = lock.enforce_mut(vec![subject, path, action]) {
+                return Either::Left(self.service.call(req))
             }
-        })
+            drop(lock);
+        }
+        Either::Right(ok(req.into_response(HttpResponse::Unauthorized().finish())))
     }
 }
