@@ -105,9 +105,10 @@ impl<S> Service<ServiceRequest> for CasbinMiddleware<S>
         let service = Rc::clone(&self.service);
 
         async move {
-            let subject = match option_vals {
-                None => return Ok(req.into_response(HttpResponse::Unauthorized().finish())),
-                Some(v) => v.subject
+            let subject = if let Some(val) = option_vals {
+                val.subject
+            }else{
+                "".to_string()
             };
 
             let mut lock = cloned_enforcer.write().await;
