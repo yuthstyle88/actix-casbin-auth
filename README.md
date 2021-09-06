@@ -46,7 +46,6 @@ pub async fn validator(req: ServiceRequest, credentials: BearerAuth) -> Result<S
     let claims = utils::token::decode_token(credentials.token(), &constants::KEY)?;
     let role = claims.role;
     let uuid = claims.user;
-    log::info!("UUID: {}", &uuid);
     req.extensions_mut().insert(uuid);
     let vals = CasbinVals {
         subject: role,
@@ -54,16 +53,6 @@ pub async fn validator(req: ServiceRequest, credentials: BearerAuth) -> Result<S
     };
     req.extensions_mut().insert(vals);
     Ok(req)
-}
-
-fn is_can_access(path: String, rule_list: Vec<Rules>) -> Result<bool, MyError> {
-    for rule in rule_list {
-        if path == rule.routes.unwrap() {
-            log::info!("Allow Access: {}", path);
-            return Ok(true);
-        }
-    }
-    Err(MyError::new(anyhow!("permission_deny")))
 }
 ````
 
