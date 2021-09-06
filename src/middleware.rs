@@ -162,7 +162,6 @@ impl<S, B, F, T, O> Service<ServiceRequest> for CasbinMiddleware<S, F, T>
 
         let path = req.path().to_string();
         let action = req.method().as_str().to_string();
-        let option_vals = req.extensions().get::<CasbinVals>().map(|x| x.to_owned());
         let service = Rc::clone(&self.service);
 
         let process_fn = Arc::clone(&self.process_fn);
@@ -176,7 +175,7 @@ impl<S, B, F, T, O> Service<ServiceRequest> for CasbinMiddleware<S, F, T>
             };
 
             let req = process_fn(req, credentials).await?;
-
+            let option_vals = req.extensions().get::<CasbinVals>().map(|x| x.to_owned());
             let subject = if let Some(val) = option_vals {
                 val.subject
             } else {
