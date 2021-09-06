@@ -1,3 +1,7 @@
+#![deny(clippy::all)]
+
 pub use casbin;
+pub mod extractors;
+pub mod headers;
 pub mod middleware;
-pub use middleware::{CasbinMiddleware, CasbinService, CasbinVals};
+mod utils;
