@@ -27,71 +27,43 @@ You should put `actix_casbin_auth::CasbinVals` which contains `subject`(username
 For example:
 
 ```rust
-use std::cell::RefCell;
-use std::pin::Pin;
-use std::rc::Rc;
-use std::task::{Context, Poll};
+use actix_web::{dev::ServiceRequest, Error, HttpMessage};
+use actix_web::http::{HeaderName, HeaderValue};
+use crate::constants;
+use uuid::Uuid;
+use std::str::FromStr;
+use models::roles_rules::RolesRules;
+use models::rules::Rules;
+use models::schema::rules::dsl::rules;
+use crate::app::AppContext;
+use actix_web::web::Data;
+use models::backend_users::BackendUser;
+use utils::my_error::MyError;
+use actix_casbin_auth::extractors::bearer::BearerAuth;
+use actix_casbin_auth::middleware::CasbinVals;
 
-use actix_service::{Service, Transform};
-use actix_web::{dev::ServiceRequest, dev::ServiceResponse, Error, HttpMessage};
-use futures::future::{ok, Future, Ready};
-
-use actix_casbin_auth::CasbinVals;
-
-
-pub struct FakeAuth;
-
-impl<S: 'static, B> Transform<S> for FakeAuth
-    where
-        S: Service<Request = ServiceRequest, Response = ServiceResponse<B>, Error = Error>,
-        S::Future: 'static,
-        B: 'static,
-{
-    type Request = ServiceRequest;
-    type Response = ServiceResponse<B>;
-    type Error = Error;
-    type InitError = ();
-    type Transform = FakeAuthMiddleware<S>;
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
-
-    fn new_transform(&self, service: S) -> Self::Future {
-        ok(FakeAuthMiddleware {
-            service: Rc::new(RefCell::new(service)),
-        })
-    }
+pub async fn validator(req: ServiceRequest, credentials: BearerAuth) -> Result<ServiceRequest, Error> {
+    let claims = utils::token::decode_token(credentials.token(), &constants::KEY)?;
+    let role = claims.role;
+    let uuid = claims.user;
+    log::info!("UUID: {}", &uuid);
+    req.extensions_mut().insert(uuid);
+    let vals = CasbinVals {
+        subject: role,
+        domain: None,
+    };
+    req.extensions_mut().insert(vals);
+    Ok(req)
 }
 
-pub struct FakeAuthMiddleware<S> {
-    service: Rc<RefCell<S>>,
-}
-
-impl<S, B> Service for FakeAuthMiddleware<S>
-    where
-        S: Service<Request = ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
-        S::Future: 'static,
-        B: 'static,
-{
-    type Request = ServiceRequest;
-    type Response = ServiceResponse<B>;
-    type Error = Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
-
-    fn poll_ready(&mut self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        self.service.poll_ready(cx)
+fn is_can_access(path: String, rule_list: Vec<Rules>) -> Result<bool, MyError> {
+    for rule in rule_list {
+        if path == rule.routes.unwrap() {
+            log::info!("Allow Access: {}", path);
+            return Ok(true);
+        }
     }
-
-    fn call(&mut self, req: ServiceRequest) -> Self::Future {
-        let mut svc = self.service.clone();
-
-        Box::pin(async move {
-            let vals = CasbinVals {
-                subject: String::from("alice"),
-                domain: None,
-            };
-            req.extensions_mut().insert(vals);
-            svc.call(req).await
-        })
-    }
+    Err(MyError::new(anyhow!("permission_deny")))
 }
 ````
 
@@ -105,7 +77,9 @@ use actix_web::{web, App, HttpResponse, HttpServer};
 use actix_casbin_auth::casbin::function_map::key_match2;
 
 #[allow(dead_code)]
-mod fake_auth;
+
+use actix_casbin_auth::middleware::{MyEnforcer};
+use crate::middleware::authentication::validator;
 
 #[actix_rt::main]
 async fn main() -> Result<()> {
@@ -114,7 +88,7 @@ async fn main() -> Result<()> {
         .unwrap();
     let a = FileAdapter::new("examples/rbac_with_pattern_policy.csv");  //You can also use diesel-adapter or sqlx-adapter
 
-    let casbin_middleware = CasbinService::new(m, a).await?;
+    let casbin_middleware = MyEnforcer::new(m, a).await?;
 
     casbin_middleware
         .write()
@@ -127,7 +101,7 @@ async fn main() -> Result<()> {
     HttpServer::new(move || {
         App::new()
             .wrap(casbin_middleware.clone())
-            .wrap(FakeAuth)          
+            .wrap(actix_casbin_auth::middleware::CasbinService::bearer(casbin_middleware.get_enforcer(),validator))    
             .route("/pen/1", web::get().to(|| HttpResponse::Ok()))
             .route("/book/{id}", web::get().to(|| HttpResponse::Ok()))
     })
