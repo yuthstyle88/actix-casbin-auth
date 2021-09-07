@@ -158,7 +158,7 @@ impl<S, B, F, T, O> Service<ServiceRequest> for CasbinMiddleware<S, F, T>
     actix_service::forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
-        let cloned_enforcer = self.enforcer.clone();
+        let cloned_enforcer = Arc::clone(&self.enforcer);
 
         let path = req.path().to_string();
         let action = req.method().as_str().to_string();
